@@ -6,7 +6,7 @@
 <meta name="description" content="PPFD Meter Pro – Smartphone-Kamera-basierte Messung der photosynthetisch aktiven Photonenflussdichte (PAR/PPFD) für Pflanzenbeleuchtung, mit Kalibrierung und Trainingsdaten-Export.">
 <meta name="theme-color" content="#0d1f10">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%B1%3C/text%3E%3C/svg%3E">
-<title>PPFD Meter Pro v3.3.5</title>
+<title>PPFD Meter Pro v3.3.13</title>
 <style>
   :root{--bg:#0d1f10;--surface:#152118;--border:#2a3d2c;--green:#4ade80;--amber:#fbbf24;--red:#f87171;--text:#e8f5ea;--muted:#6b8f6e;--card-bg:#1a2f1e;--blue:#60a5fa;--purple:#c084fc;--mono:ui-monospace,'Roboto Mono','Cascadia Mono',Menlo,Consolas,monospace;--sans:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif}
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -73,6 +73,12 @@
   .q-status-line.warn{color:var(--amber)}
   .warmup-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(13,31,16,.92);display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:10;border-radius:16px;opacity:0;pointer-events:none;transition:opacity .3s}
   .warmup-overlay.active{opacity:1;pointer-events:all}
+  .blacklevel-overlay{position:fixed;inset:0;background:#000;display:none;flex-direction:column;justify-content:center;align-items:center;z-index:150}
+  .blacklevel-overlay.active{display:flex}
+  .bl-bar{width:4px;height:0;background:var(--green);box-shadow:0 0 12px var(--green);transition:height 1.8s cubic-bezier(.25,.1,.25,1)}
+  .bl-bar.grow{height:70vh}
+  .bl-label{color:var(--muted);font-family:var(--mono);font-size:11px;letter-spacing:.15em;text-transform:uppercase;margin-top:16px;opacity:0;transition:opacity .4s}
+  .bl-label.show{opacity:1}
   .warmup-bar{width:200px;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:12px}
   .warmup-fill{height:100%;background:var(--purple);width:0%;transition:width .3s}
   .error-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--red);color:var(--bg);padding:12px 24px;border-radius:8px;font-family:var(--mono);font-size:11px;z-index:200;transition:transform .3s;max-width:90%;text-align:center}
@@ -82,7 +88,7 @@
 </head>
 <body>
 <header>
-  <span class="app-title">PPFD Meter Pro v3.3.5</span>
+  <span class="app-title">PPFD Meter Pro v3.3.13</span>
   <div class="status-dot" id="statusDot"></div>
 </header>
 <main>
@@ -155,6 +161,9 @@
   <div class="flicker-warning" id="flickerWarning">⚠️ FLICKER ERKANNT</div>
 
   <button class="calib-btn" onclick="openCalibModal()">🔧 Kalibrierung</button>
+  <button class="calib-btn" style="border-color:var(--muted);color:var(--muted)" id="measureBlackLevelBtn" onclick="measureBlackLevel()">⚫ Schwarzwert messen (Linse abdecken)</button>
+  <div class="src-note" id="blackLevelNote" style="text-align:center"></div>
+  <button class="calib-btn" style="border-color:var(--red);color:var(--red);margin-top:4px;display:none" id="resetBlackLevelBtn" onclick="resetBlackLevel()">Schwarzwert-Referenz löschen</button>
 
   <div class="params-card" id="trainCard">
     <div class="section-label">Trainingsdaten (Referenzmessung)</div>
@@ -178,15 +187,20 @@
   </div>
 
   <div class="calib-note">
-    v3.3.5 · Exakte sRGB-EOTF (IEC 61966-2-1) · PAR-Gewichtung · Adaptiver Kalman · Uniformitäts-CV (3×3) · Qualitätsindex Q · GUM-Unsicherheit (±%) · Status-Checkliste<br>
+    v3.3.13 · Exakte sRGB-EOTF (IEC 61966-2-1) · PAR-Gewichtung · Adaptiver Kalman · Uniformitäts-CV (3×3) · Qualitätsindex Q · GUM-Unsicherheit (±%) · Status-Checkliste<br>
     Rolling-Shutter Flicker · Adaptives Subsampling · FSM Hysterese · Persistente Kalibrierung (v2) · WB-Lock · Zielband-Fallback · EV-Anti-Clipping<br>
     Live-Exposure (SW-Modus) · Flicker-Periodizität · Start-Race-Guard · Clipping-Priorität · Kalibrier-Guards · Signal-Flag · Manuelle Lichtprofile · Reine Pipeline-Funktionen<br>
+    Manual-Exposure-Gate · Watchdog nach Permission · Tune-Zeitbudget · Schwarzwert-Abbruch-Guards · State-Glow-Fix · Gain-Slider-Sync<br>
     <span id="deviceInfo">Gerät: wird erkannt...</span>
   </div>
 </main>
 
 <video id="videoFeed" autoplay playsinline muted></video>
 <canvas id="processCanvas" width="320" height="240"></canvas>
+<div class="blacklevel-overlay" id="blOverlay">
+  <div class="bl-bar" id="blBar"></div>
+  <div class="bl-label" id="blLabel">SCHWARZWERT WIRD GEMESSEN...</div>
+</div>
 <div class="error-toast" id="errorToast"></div>
 
 <div class="modal-overlay" id="calibModal">
@@ -239,7 +253,8 @@ function classifySignal(yMeanLin){
   return{level:'ok',label:'OK',color:'var(--green)'};
 }
 
-function analyzeFrame(data,width,height,pixelStep,lut){
+function analyzeFrame(data,width,height,pixelStep,lut,blackLevelLin){
+  blackLevelLin=blackLevelLin||0;
   let sumR_lin=0,sumG_lin=0,sumB_lin=0,sumY_lin=0;
   let sumR_gamma=0,sumG_gamma=0,sumB_gamma=0,sumY_gamma=0;
   let clippingPixels=0,sampledPixels=0;
@@ -251,7 +266,7 @@ function analyzeFrame(data,width,height,pixelStep,lut){
   for(let i=0;i<len;i+=stride){
     const rg=data[i],gg=data[i+1],bg=data[i+2];
     if(rg>250||gg>250||bg>250) clippingPixels++;
-    const rl=lut[rg],gl=lut[gg],bl=lut[bg];
+    const rl=Math.max(0,lut[rg]-blackLevelLin),gl=Math.max(0,lut[gg]-blackLevelLin),bl=Math.max(0,lut[bg]-blackLevelLin);
     sumR_lin+=rl;sumG_lin+=gl;sumB_lin+=bl;
     const yLin=Y_R*rl+Y_G*gl+Y_B*bl;
     sumY_lin+=yLin;
@@ -372,7 +387,13 @@ class TemperatureCompensator {
 
 class AppStatusStateMachine {
   constructor(){
-    this.STATES={WARMUP:{id:'WARMUP',color:'var(--purple)',label:'SENS_WARMUP'},STABLE:{id:'STABLE',color:'var(--green)',label:'OPTIMAL'},FLICKER:{id:'FLICKER',color:'var(--amber)',label:'FLICKER_WARN'},CLIPPING:{id:'CLIPPING',color:'var(--red)',label:'OVEREXPOSED'},LOW_PERF:{id:'LOW_PERF',color:'var(--muted)',label:'CPU_LIMIT'}};
+    // v3.3.13 FIX (Review): glow als Hex-Literal zusätzlich zu color. Aus
+    // state.color+'33' wurde bisher z.B. 'var(--red)33' - bei der var()-
+    // Substitution entstehen daraus zwei getrennte Tokens, der radial-
+    // gradient wird ungültig und der Karten-Glow fiel in allen Nicht-STABLE-
+    // Zuständen still aus. Hex-Werte müssen mit den :root-Variablen oben
+    // übereinstimmen.
+    this.STATES={WARMUP:{id:'WARMUP',color:'var(--purple)',glow:'#c084fc',label:'SENS_WARMUP'},STABLE:{id:'STABLE',color:'var(--green)',glow:'#4ade80',label:'OPTIMAL'},FLICKER:{id:'FLICKER',color:'var(--amber)',glow:'#fbbf24',label:'FLICKER_WARN'},CLIPPING:{id:'CLIPPING',color:'var(--red)',glow:'#f87171',label:'OVEREXPOSED'},LOW_PERF:{id:'LOW_PERF',color:'var(--muted)',glow:'#6b8f6e',label:'CPU_LIMIT'}};
     this.current=this.STATES.WARMUP;
     this.acc={flicker:0,clipping:0,perf:0};
     this.LIMITS={FLICKER_ENTER:20,FLICKER_EXIT:0,CLIP_ENTER:5,CLIP_EXIT:0,PERF_ENTER:45,PERF_EXIT:0};
@@ -504,6 +525,7 @@ let lastAiUpdate=0,hardwareSettings=null,useSoftwareGain=false;
 let wbManual=false;
 let customCalibFactor=null,activeStream=null,currentRawPPFD=0,currentRawPPFDUncalibrated=0,frameCount=0,animationFrameId=null;
 let blackFrameCount=0,blackFrameStage=0;
+let blackLevelMeasuring=false;
 let wakeLock=null;
 async function acquireWakeLock(){
   try{
@@ -541,6 +563,8 @@ function migrateCalibrationStorage(){
 }
 let cameraFacing=(()=>{try{return localStorage.getItem('ppfd_camera')||'user';}catch(e){return 'user';}})();
 customCalibFactor=loadCalibFactor();
+let blackLevelLin=0;
+blackLevelLin=loadBlackLevel();
 
 let lastFrameTime=0,smoothedFps=30;
 let pixelStep=4,stepTransitionAccum=0;
@@ -616,15 +640,111 @@ function sampleFrameY(){
   return sum/n;
 }
 
+const BLACKLEVEL_KEY='ppfd_blackLevel_v1';
+function loadBlackLevel(){
+  try{const v=parseFloat(localStorage.getItem(BLACKLEVEL_KEY+'_'+cameraFacing));return Number.isFinite(v)&&v>=0?v:0;}catch(e){return 0;}
+}
+async function measureBlackLevel(){
+  if(!isMeasuring){showError('Erst Messung starten, dann Linse komplett abdecken.');return;}
+  // v3.3.13 FIX (Review): isMeasuring wurde nur am Anfang geprüft. Stoppte
+  // oder wechselte der Nutzer die Kamera während der ~2,5s-Messung, sampelte
+  // die Schleife weiter vom stehengebliebenen Canvas (drawImage ist bei
+  // Video ohne Frames ein No-op) - und speicherte das Ergebnis bei
+  // toggleCamera() sogar unter dem Key der NEUEN Kamera, obwohl alle Frames
+  // von der alten stammten. Jetzt: Facing beim Start festhalten, vor jedem
+  // Sample prüfen, unter dem festgehaltenen Key speichern.
+  const startFacing=cameraFacing;
+  const measurementAborted=()=>!isMeasuring||cameraFacing!==startFacing;
+  const btn=document.getElementById('measureBlackLevelBtn');
+  const overlay=document.getElementById('blOverlay'),bar=document.getElementById('blBar'),label=document.getElementById('blLabel');
+  const originalText=btn.textContent;
+  btn.disabled=true;btn.textContent='⏳ Messung läuft...';
+  blackLevelMeasuring=true; // v3.3.11 FIX (Review): friert die Statistik-Verbraucher unten in processLoop ein
+  overlay.classList.add('active');
+  bar.classList.remove('grow');label.classList.remove('show');
+  void bar.offsetWidth;
+  requestAnimationFrame(()=>{bar.classList.add('grow');label.classList.add('show');});
+  showError('Linse jetzt komplett abdecken – Messung läuft 2 Sekunden...');
+  try{
+    await new Promise(r=>setTimeout(r,1500));
+    const SAMPLES=10;
+    let sum=0;
+    for(let i=0;i<SAMPLES;i++){
+      if(measurementAborted()){showError('Schwarzwertmessung abgebrochen (Kamera gestoppt oder gewechselt).');return;}
+      ctx.drawImage(video,0,0,320,240);
+      const d=ctx.getImageData(0,0,320,240).data;
+      let ySum=0,n=0;
+      for(let j=0;j<d.length;j+=16){
+        const rl=gammaLUT[d[j]],gl=gammaLUT[d[j+1]],bl=gammaLUT[d[j+2]];
+        ySum+=Y_R*rl+Y_G*gl+Y_B*bl;n++;
+      }
+      sum+=ySum/n;
+      await new Promise(r=>setTimeout(r,100));
+    }
+    const measured=sum/SAMPLES;
+    if(measurementAborted()){showError('Schwarzwertmessung abgebrochen (Kamera gestoppt oder gewechselt).');return;}
+    if(measured>0.02){
+      showError('Gemessener Wert zu hoch ('+measured.toFixed(4)+') – Linse richtig abdecken und erneut versuchen.');
+      return;
+    }
+    blackLevelLin=measured;
+    try{localStorage.setItem(BLACKLEVEL_KEY+'_'+startFacing,blackLevelLin);}catch(e){}
+    showError('Schwarzwert gemessen: '+blackLevelLin.toFixed(5)+' (linear) – gespeichert.');
+    updateBlackLevelNote();
+    playPing();
+  }finally{
+    overlay.classList.remove('active');
+    btn.disabled=false;btn.textContent=originalText;
+    blackLevelMeasuring=false;
+  }
+}
+function updateBlackLevelNote(){
+  const el=document.getElementById('blackLevelNote');
+  if(!el) return;
+  el.textContent=blackLevelLin>0?('Aktive Referenz: '+blackLevelLin.toFixed(5)+' (linear)'):'Keine Referenz gemessen (0, keine Subtraktion)';
+  const resetBtn=document.getElementById('resetBlackLevelBtn');
+  if(resetBtn) resetBtn.style.display=blackLevelLin>0?'block':'none';
+}
+
+let audioCtx=null;
+function playPing(){
+  try{
+    if(!audioCtx) audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    const osc=audioCtx.createOscillator();
+    const gain=audioCtx.createGain();
+    osc.type='sine';
+    osc.frequency.setValueAtTime(880,audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1760,audioCtx.currentTime+0.08);
+    gain.gain.setValueAtTime(0,audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.15,audioCtx.currentTime+0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.5);
+    osc.connect(gain);gain.connect(audioCtx.destination);
+    osc.start();osc.stop(audioCtx.currentTime+0.5);
+  }catch(e){console.warn('[PPFD] Ping-Sound fehlgeschlagen:',e);}
+}
+function resetBlackLevel(){
+  blackLevelLin=0;
+  try{localStorage.removeItem(BLACKLEVEL_KEY+'_'+cameraFacing);}catch(e){}
+  showError('Schwarzwert-Referenz zurückgesetzt (0, keine Subtraktion).');
+  updateBlackLevelNote();
+}
+
 async function tuneExposure(track,cap,startReq){
+  // v3.3.13 (Review): Hartes Zeitbudget. Worst Case lag bisher bei ~11,5s
+  // (6 Iterationen × bis 1,5s + Anti-Sat + Verify) und konnte zusammen mit
+  // dem Video-Ready-Timeout den 15s-Watchdog spurios auslösen. Nach Ablauf
+  // des Budgets wird sauber mit dem bis dahin erreichten Stand ausgestiegen
+  // (targetBandMet entscheidet dann wie gehabt über den Fallback).
+  const deadline=performance.now()+8000;
   let req=startReq,trail=[startReq],y=0;
   const capMin=cap.exposureTime?.min??startReq,capMax=cap.exposureTime?.max??startReq;
   let prevY=sampleFrameY();
   for(let iter=0;iter<6;iter++){
+    if(performance.now()>deadline) break;
     await new Promise(r=>setTimeout(r,500));
     y=sampleFrameY();
     let stall=0;
-    while(Math.abs(y-prevY)<2&&stall<5){await new Promise(r=>setTimeout(r,200));y=sampleFrameY();stall++;}
+    while(Math.abs(y-prevY)<2&&stall<5&&performance.now()<deadline){await new Promise(r=>setTimeout(r,200));y=sampleFrameY();stall++;}
     prevY=y;
     if(y<25&&req<capMax){
       req=Math.min(req*4,capMax);
@@ -644,6 +764,34 @@ async function tuneExposure(track,cap,startReq){
       y=sampleFrameY();
       trail.push(req+'(anti-sat)');
     }catch(e){}
+  }
+  // v3.3.11: Aktiver Verify-Schritt für den Fall, dass die erste Messung
+  // bereits im Zielband lag (trail.length===1, keine Rampe nötig) - genau
+  // der Fall, der auf dem A17 wiederholt zu "exposure-mode-unconfirmed"
+  // führte (Y zufällig im Band, aber ns.exposureTime rundet auf einen
+  // anderen Wert als angefordert). Bisher hatten wir in diesem Fall KEINEN
+  // Beweis für echte Kausalität - nur Zufall, dass die Szene bei
+  // WELCHER Belichtung auch immer der Sensor gerade lief passte. Hier wird
+  // gezielt gestört (Belichtung verdoppeln, klemmt an capMax) und wieder
+  // zurückgesetzt: Ändert sich Y spürbar, ist das echte Ursache-
+  // Wirkung, kein Zufall. req bleibt am Ende beim Original-Wert, die
+  // eigentliche Messung wird dadurch nicht verändert - nur der Beweis für
+  // "manuelle Kontrolle funktioniert" wird nachgeliefert.
+  if(trail.length===1 && y>=25 && y<=220 && performance.now()<deadline){
+    const testReq=Math.min(req*2,capMax);
+    if(testReq!==req){
+      try{
+        await track.applyConstraints({advanced:[{exposureTime:testReq}]});
+        await new Promise(r=>setTimeout(r,500));
+        const testY=sampleFrameY();
+        await track.applyConstraints({advanced:[{exposureTime:req}]});
+        await new Promise(r=>setTimeout(r,500));
+        y=sampleFrameY();
+        if(Math.abs(testY-y)>5){
+          trail.push(req+'(verify)');
+        }
+      }catch(e){/* Verify fehlgeschlagen - trail bleibt bei length===1, kein Beleg, korrekt konservativ */}
+    }
   }
   const targetBandMet=y>=25&&y<=220;
   if(!targetBandMet){try{await track.applyConstraints({advanced:[{exposureMode:'continuous'}]});}catch(e){}}
@@ -684,6 +832,7 @@ async function applyHardwareConstraints(stream){
         constraints.exposureTime=tuned.req;
         result.exposureTuneTrail=tuned.trail.join('→');
         result.exposureTuneY=tuned.finalY;
+        result.exposureTuneRampVerified=tuned.trail.length>1;
         if(!tuned.targetBandMet){
           console.warn('[PPFD] tuneExposure außerhalb Zielband (finalY='+tuned.finalY.toFixed(1)+'). Fallback auf Auto.');
           const debugStr=`min=${cap.exposureTime?.min ?? '?'} max=${cap.exposureTime?.max ?? '?'} tune=${tuned.trail.join('→')} Y=${tuned.finalY.toFixed(1)} nach=? →FALLBACK`;
@@ -694,8 +843,23 @@ async function applyHardwareConstraints(stream){
           return result;
         }
       }else{
+        // v3.3.13 FIX (Review): Dieser Pfad wird nur erreicht, wenn KEINE
+        // manuelle Belichtung verfügbar ist (nur ISO und/oder WB). Bisher
+        // fiel er unten trotzdem auf constraintsApplied=true durch
+        // (attemptedManualExposure=false => modeConfirmed trivially true):
+        // UI zeigte "Manuell", kein Software-Gain, kalman.r=2.5 - aber die
+        // Belichtung regelte real weiter automatisch. Die Auto-Belichtung
+        // normalisiert die Bildhelligkeit, der PPFD-Wert wurde damit
+        // weitgehend lichtstärken-unabhängig (Messfehler). Jetzt: ISO/WB
+        // anwenden, aber ehrlich als Software-Fallback deklarieren - der
+        // SW-Poll in processLoop trackt dann exposureTime/ISO live.
         await track.applyConstraints({advanced:[constraints]});
-        if(constraints.whiteBalanceMode==='manual') result.wbManual=true;
+        if(constraints.whiteBalanceMode==='manual'){
+          const nsSw=track.getSettings();
+          result.wbManual=!nsSw.whiteBalanceMode||nsSw.whiteBalanceMode==='manual';
+        }
+        result.fallbackMode='no-manual-exposure';
+        return result;
       }
       const ns=track.getSettings();
       if(result.wbManual && ns.whiteBalanceMode) result.wbManual=ns.whiteBalanceMode==='manual';
@@ -718,20 +882,9 @@ async function applyHardwareConstraints(stream){
         constraints.exposureTime!==undefined &&
         Math.abs(ns.exposureTime-constraints.exposureTime)<=2;
       const modeConfirmed=!attemptedManualExposure || !ns.exposureMode ||
-        ns.exposureMode==='manual' || expMatch;
+        ns.exposureMode==='manual' || expMatch || result.exposureTuneRampVerified;
       if(!modeConfirmed){
         console.warn('[PPFD] Weder exposureMode noch exposureTime bestätigen Manual-Lock: mode=',ns.exposureMode,'angefragt=',constraints.exposureTime,'live=',ns.exposureTime);
-        // v3.2.3 FIX (bei v3.3.x-Merge verlorengegangen, v3.3.5 wiederhergestellt):
-        // Anders als der exposure-out-of-range-Pfad (der die Kamera in
-        // tuneExposure aktiv auf 'continuous' zurücksetzt) und der catch-Pfad
-        // weiter unten (Review #5) gab dieser Pfad bisher einfach auf, OHNE
-        // die Kamera freizugeben. Der Sensor blieb dann in dem Halb-manuell-
-        // Zustand hängen, in dem der Treiber ihn zuletzt verlassen hatte -
-        // keine echte Auto-Belichtung mehr, aber auch kein funktionierender
-        // Manual-Lock. Symptom (im Feldtest reproduziert): Bild bleibt
-        // dauerhaft "overexposed" im Software-Modus, wenn man sich nach dem
-        // Start in hellere Umgebung bewegt, weil sich der Sensor nicht mehr
-        // anpasst.
         try{await track.applyConstraints({advanced:[{exposureMode:'continuous'}]});}catch(e){}
         result.fallbackMode='exposure-mode-unconfirmed';
         return result;
@@ -819,7 +972,7 @@ function saveTrainPoint(){
 function exportTrainCSV(){
   const data=loadTrainData();
   if(data.length===0){showError('Keine Datenpunkte vorhanden.');return;}
-  const cols=['timestamp','geraet','referenzPPFD','notiz','kamera','avgR_gamma','avgG_gamma','avgB_gamma','avgR_lin','avgG_lin','avgB_lin','yMean_gamma','yMean_lin','exposureTime','iso','gainMultiplier','hardwareMode','fallbackMode','rawPPFDUncalibrated','lichtquelle','clipLevel','linearization','signalLevel','lichtquelleModus','profilFaktor','profilUnsicherheit','uniformityCV','qualityQ','qClip','qUniformity','qSignal','qStability','temporalCV','uRel','uSys','uRand','uCal','uProfile','uTemporal','uNoise'];
+  const cols=['timestamp','geraet','referenzPPFD','notiz','kamera','avgR_gamma','avgG_gamma','avgB_gamma','avgR_lin','avgG_lin','avgB_lin','yMean_gamma','yMean_lin','exposureTime','iso','gainMultiplier','hardwareMode','fallbackMode','rawPPFDUncalibrated','lichtquelle','clipLevel','linearization','blackLevelLin','signalLevel','lichtquelleModus','profilFaktor','profilUnsicherheit','uniformityCV','qualityQ','qClip','qUniformity','qSignal','qStability','temporalCV','uRel','uSys','uRand','uCal','uProfile','uTemporal','uNoise'];
   const rows=[cols.join(',')];
   const csvField=(v)=>{
     if(v===undefined||v===null) return '';
@@ -870,27 +1023,61 @@ async function toggleCamera(){
   try{localStorage.setItem('ppfd_camera',cameraFacing);}catch(e){}
   updateCameraToggleLabel();
   customCalibFactor=loadCalibFactor();
+  blackLevelLin=loadBlackLevel();
+  updateBlackLevelNote();
   if(isMeasuring){stopCamera();await startCamera();}
 }
 
 async function startCamera(){
   if(isMeasuring||activeStream||isStarting) return;
   isStarting=true;
+  let lastStartStep='0/4 Start...';
+  let startAborted=false;
+  let wdTimer=null;
   const startBtnEl=document.getElementById('startBtn');
   startBtnEl.disabled=true;startBtnEl.textContent='Starte...';
+  const setStep=(s)=>{lastStartStep=s;try{startBtnEl.textContent=s;}catch(e){}};
+  // v3.3.11 FIX (Review): Promise.race bricht den Verlierer NICHT ab - lief
+  // getUserMedia() o.ä. beim Watchdog-Feuern noch, setzte sich die IIFE im
+  // Hintergrund fort (activeStream zugewiesen, isMeasuring=true, processLoop
+  // gestartet), NACHDEM der Nutzer schon "abgebrochen" gemeldet bekam und der
+  // Button wieder freigegeben war - Kamera-LED blieb an, ein zweiter Start
+  // konnte mit dem Geist-Lauf kollidieren (genau der Doppelstart-Bug, den
+  // der Guard eigentlich verhindern soll). startAborted wird nach jedem
+  // await geprüft und räumt in dem Fall sofort auf, statt weiterzulaufen.
+  const abortCleanup=()=>{
+    if(activeStream){try{activeStream.getTracks().forEach(t=>t.stop());}catch(e){}activeStream=null;}
+    if(video.srcObject) video.srcObject=null;
+  };
   try{
+    // v3.3.13 FIX (Review): getUserMedia() VOR dem Watchdog-Start - der
+    // Permission-Dialog wartet auf den Nutzer und darf beliebig lange offen
+    // bleiben. Bisher zählte die Lesezeit des Dialogs gegen die 15s: wer
+    // beim allerersten Start langsam las, bekam "abgebrochen" gemeldet und
+    // der gerade genehmigte Stream wurde sofort wieder gestoppt. Der
+    // Watchdog schützt jetzt nur noch die Schritte, die ohne Nutzer-
+    // Interaktion ablaufen (Video-Ready, Belichtungs-Tuning, Finalisierung).
+    setStep('1/4 Kamera anfragen...');
     activeStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:cameraFacing},width:{ideal:320},height:{ideal:240}}});
+    const watchdog=new Promise((_,reject)=>{wdTimer=setTimeout(()=>reject(new Error('watchdog-timeout')),15000);});
+    await Promise.race([(async()=>{
+    if(startAborted){abortCleanup();return;}
     video.srcObject=activeStream;
     try{await video.play();}catch(e){console.warn('video.play():',e);}
+    setStep('2/4 Video bereit...');
     await new Promise(res=>{
       if(video.readyState>=2) return res();
       const t=setTimeout(res,3000);
       video.addEventListener('loadeddata',()=>{clearTimeout(t);res();},{once:true});
     });
+    if(startAborted){abortCleanup();return;}
     blackFrameStage=0;blackFrameCount=0;exposureDriftStrikes=0;lastExposureCheckFrame=0;exposureLockBaseline=null;
     lastSwPollFrame=0;
     clipCriticalFrames=0;clipEvApplied=false;clipHintShown=false;
+    setStep('3/4 Belichtung einstellen...');
     hardwareSettings=await applyHardwareConstraints(activeStream);
+    if(startAborted){abortCleanup();return;}
+    setStep('4/4 Fertigstellen...');
     const mode=hardwareSettings.constraintsApplied?'Manuell':(hardwareSettings.fallbackMode?'Software':'Auto');
     const modeSuffix=hardwareSettings.fallbackMode?` (${hardwareSettings.fallbackMode})`:'';
     document.getElementById('deviceInfo').textContent=`Gerät: ${hardwareSettings.deviceLabel} · ${mode}${modeSuffix} · ${hardwareSettings.frameRate?.toFixed(0)||'?'} fps`;
@@ -922,17 +1109,21 @@ async function startCamera(){
     document.getElementById('statusDot').classList.add('active');
     isMeasuring=true;
     await acquireWakeLock();
+    if(startAborted){abortCleanup();isMeasuring=false;return;}
     animationFrameId=requestAnimationFrame(processLoop);
+    })(),watchdog]);
   }catch(err){
+    startAborted=true;
     if(activeStream){try{activeStream.getTracks().forEach(t=>t.stop());}catch(e2){}activeStream=null;}
     if(video.srcObject) video.srcObject=null;
     isMeasuring=false;setButtonState('idle');
     document.getElementById('statusDot').className='status-dot error';
-    if(err.name==='NotAllowedError') showError('Kamera-Zugriff verweigert.');
+    if(err.message==='watchdog-timeout') showError('Start hat >15s gedauert und wurde abgebrochen (zuletzt: '+lastStartStep+'). Bitte erneut versuchen.');
+    else if(err.name==='NotAllowedError') showError('Kamera-Zugriff verweigert.');
     else if(err.name==='NotFoundError') showError('Keine Kamera gefunden.');
     else if(err.name==='NotReadableError') showError('Kamera wird bereits verwendet.');
     else showError('Kamera-Fehler: '+err.message);
-  }finally{isStarting=false;}
+  }finally{isStarting=false;clearTimeout(wdTimer);}
 }
 
 function stopCamera(){
@@ -1021,6 +1212,11 @@ async function revertToAutoExposure(reason){
   useSoftwareGain=true;
   clipCriticalFrames=0;clipEvApplied=false;clipHintShown=false;
   document.getElementById('gainControl').classList.add('visible');
+  // v3.3.13 FIX (Review): Slider-Knopf mit dem tatsächlichen Gain
+  // synchronisieren - der DOM-Wert konnte noch aus einer früheren Session
+  // stammen (z.B. 2,5×), während effektiv 1,00× wirkte.
+  document.getElementById('gainSlider').value=gainController.gain;
+  document.getElementById('gainValue').textContent=gainController.gain.toFixed(2)+'×';
   document.getElementById('hardwareVal').textContent='Auto (Fallback: '+(reason||'auto-revert')+')';
   kalman.r=8.0;
   tempCompensator.reset();
@@ -1051,11 +1247,22 @@ function processLoop(timestamp){
     document.getElementById('uniformityVal').textContent=lastUniformityCV===null?'–':(lastUniformityCV*100).toFixed(1)+' %';
   }
 
+  // v3.3.11 FIX (Review): Während measureBlackLevel() läuft, würden sonst
+  // die gezielt abgedeckten (künstlich dunklen) Frames in Kalman,
+  // TemporalStats und die Detektoren einfließen - nach dem Aufdecken zeigte
+  // sich das als sichtbarer Ausreißer (temporaler CV springt, Q fällt,
+  // u_rel schießt hoch). UI ist während der Messung ohnehin komplett vom
+  // Overlay verdeckt, das Überspringen ist für den Nutzer unsichtbar.
+  // v3.3.13: Check vor drawImage/analyzeFrame gezogen - spart die komplette
+  // Frame-Analyse pro Frame während der Messung und hält auch die
+  // FPS-/Uniformitäts-Anzeige von den Dunkel-Frames sauber.
+  if(blackLevelMeasuring){animationFrameId=requestAnimationFrame(processLoop);return;}
+
   pixelStep=updatePixelStep(pixelStep,kalman.innovation);
 
   ctx.drawImage(video,0,0,320,240);
   const imageData=ctx.getImageData(0,0,320,240);
-  const frame=analyzeFrame(imageData.data,320,240,pixelStep,gammaLUT);
+  const frame=analyzeFrame(imageData.data,320,240,pixelStep,gammaLUT,blackLevelLin);
   const avgR_lin=frame.avgR_lin,avgG_lin=frame.avgG_lin,avgB_lin=frame.avgB_lin;
   const yMean_lin=frame.yMean_lin;
   const avgR_gamma=frame.avgR_gamma,avgG_gamma=frame.avgG_gamma,avgB_gamma=frame.avgB_gamma;
@@ -1222,6 +1429,7 @@ function processLoop(timestamp){
     lichtquelle:currentLightSourceName,
     clipLevel:clipStatus.level,
     linearization:'srgb-exact',
+    blackLevelLin:blackLevelLin,
     signalLevel:signalStatus.level,
     lichtquelleModus:manualLightKey!=='AUTO'?'manuell':'auto',
     profilFaktor:currentFactor,
@@ -1278,7 +1486,7 @@ function processLoop(timestamp){
     ppfdEl.style.color=state.color;
     badgeEl.style.color=state.color;
     badgeEl.style.borderColor=state.color;
-    cardEl.style.setProperty('--glow-color',state.color+'33');
+    cardEl.style.setProperty('--glow-color',state.glow+'33');
     dotEl.className=`status-dot active ${state.id.toLowerCase()}`;
   }
 
@@ -1290,7 +1498,7 @@ function getPPFDZone(v){
   if(v<200) return{label:'Niedrig',color:'#60a5fa'};
   if(v<400) return{label:'Optimal Keimling',color:'#34d399'};
   if(v<700) return{label:'Optimal Wachstum',color:'#4ade80'};
-  if(v<1000) return{label:'Optimal Bluete',color:'#fbbf24'};
+  if(v<1000) return{label:'Optimal Blüte',color:'#fbbf24'};
   if(v<1500) return{label:'Hoch',color:'#f97316'};
   return{label:'Sehr hoch',color:'#f87171'};
 }
@@ -1303,6 +1511,7 @@ updateTrainCount();
 initTrainDevice();
 migrateCalibrationStorage();
 initLightSourceSelect();
+updateBlackLevelNote();
 </script>
 </body>
 </html>
