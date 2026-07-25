@@ -6,7 +6,7 @@
 <meta name="description" content="PPFD Meter Pro – Smartphone-Kamera-basierte Messung der photosynthetisch aktiven Photonenflussdichte (PAR/PPFD) für Pflanzenbeleuchtung, mit Kalibrierung und Trainingsdaten-Export.">
 <meta name="theme-color" content="#0d1f10">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%B1%3C/text%3E%3C/svg%3E">
-<title>PPFD Meter Pro v3.3.13</title>
+<title>PPFD Meter Pro v3.3.14</title>
 <style>
   :root{--bg:#0d1f10;--surface:#152118;--border:#2a3d2c;--green:#4ade80;--amber:#fbbf24;--red:#f87171;--text:#e8f5ea;--muted:#6b8f6e;--card-bg:#1a2f1e;--blue:#60a5fa;--purple:#c084fc;--mono:ui-monospace,'Roboto Mono','Cascadia Mono',Menlo,Consolas,monospace;--sans:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif}
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -88,7 +88,7 @@
 </head>
 <body>
 <header>
-  <span class="app-title">PPFD Meter Pro v3.3.13</span>
+  <span class="app-title">PPFD Meter Pro v3.3.14</span>
   <div class="status-dot" id="statusDot"></div>
 </header>
 <main>
@@ -187,10 +187,10 @@
   </div>
 
   <div class="calib-note">
-    v3.3.13 · Exakte sRGB-EOTF (IEC 61966-2-1) · PAR-Gewichtung · Adaptiver Kalman · Uniformitäts-CV (3×3) · Qualitätsindex Q · GUM-Unsicherheit (±%) · Status-Checkliste<br>
+    v3.3.14 · Exakte sRGB-EOTF (IEC 61966-2-1) · PAR-Gewichtung · Adaptiver Kalman · Uniformitäts-CV (3×3) · Qualitätsindex Q · GUM-Unsicherheit (±%) · Status-Checkliste<br>
     Rolling-Shutter Flicker · Adaptives Subsampling · FSM Hysterese · Persistente Kalibrierung (v2) · WB-Lock · Zielband-Fallback · EV-Anti-Clipping<br>
     Live-Exposure (SW-Modus) · Flicker-Periodizität · Start-Race-Guard · Clipping-Priorität · Kalibrier-Guards · Signal-Flag · Manuelle Lichtprofile · Reine Pipeline-Funktionen<br>
-    Manual-Exposure-Gate · Watchdog nach Permission · Tune-Zeitbudget · Schwarzwert-Abbruch-Guards · State-Glow-Fix · Gain-Slider-Sync<br>
+    Manual-Exposure-Gate · Watchdog nach Permission · Tune-Zeitbudget · Schwarzwert-Abbruch-Guards · State-Glow-Fix · Gain-Slider-Sync · Verify ab Live-Wert (Quantisierungs-Fix)<br>
     <span id="deviceInfo">Gerät: wird erkannt...</span>
   </div>
 </main>
@@ -769,26 +769,46 @@ async function tuneExposure(track,cap,startReq){
   // bereits im Zielband lag (trail.length===1, keine Rampe nötig) - genau
   // der Fall, der auf dem A17 wiederholt zu "exposure-mode-unconfirmed"
   // führte (Y zufällig im Band, aber ns.exposureTime rundet auf einen
-  // anderen Wert als angefordert). Bisher hatten wir in diesem Fall KEINEN
-  // Beweis für echte Kausalität - nur Zufall, dass die Szene bei
-  // WELCHER Belichtung auch immer der Sensor gerade lief passte. Hier wird
-  // gezielt gestört (Belichtung verdoppeln, klemmt an capMax) und wieder
-  // zurückgesetzt: Ändert sich Y spürbar, ist das echte Ursache-
+  // anderen Wert als angefordert). Es wird gezielt gestört und wieder
+  // zurückgesetzt: Reagiert der Sensor beobachtbar, ist das echte Ursache-
   // Wirkung, kein Zufall. req bleibt am Ende beim Original-Wert, die
   // eigentliche Messung wird dadurch nicht verändert - nur der Beweis für
   // "manuelle Kontrolle funktioniert" wird nachgeliefert.
+  // v3.3.14 FIX (tin): Die Verify-Störung ging bisher vom ANGEFORDERTEN
+  // req aus (40 → Test 80). Der A17 quantisiert aber grob: 40 UND 80 landen
+  // beide bei ~100 (=10ms) - die Belichtung änderte sich real nie, testY===y,
+  // der Beweis KONNTE nicht gelingen (Log: tune=40 ohne "(verify)", Y im
+  // Band, nach=99.98, expMatch scheitert => exposure-mode-unconfirmed trotz
+  // vermutlich echtem Lock). Zweiter Skip-Pfad: ohne gemeldete
+  // cap.exposureTime-Range war capMax=startReq => testReq===req => Verify
+  // wurde stillschweigend komplett übersprungen. Jetzt: Basis ist der vom
+  // Sensor gemeldete LIVE-Ist-Wert (99.98 → Test ~200, verlässt den
+  // Quantisierungs-Bucket garantiert), Richtung ×2/÷2 nach Headroom, und
+  // neben der Y-Änderung zählt auch eine beobachtete, richtungs-konsistente
+  // Settings-Bewegung als Kausalitäts-Beleg (Suffix Y/S im Trail zeigt,
+  // welcher Beleg griff).
   if(trail.length===1 && y>=25 && y<=220 && performance.now()<deadline){
-    const testReq=Math.min(req*2,capMax);
-    if(testReq!==req){
+    const liveNow=track.getSettings().exposureTime;
+    const base=(Number.isFinite(liveNow)&&liveNow>0)?liveNow:req;
+    let testReq=base*2;
+    if(cap.exposureTime?.max!==undefined&&testReq>cap.exposureTime.max) testReq=base/2;
+    if(cap.exposureTime?.min!==undefined&&testReq<cap.exposureTime.min) testReq=null;
+    if(testReq!==null&&Math.abs(testReq-base)>2){
       try{
         await track.applyConstraints({advanced:[{exposureTime:testReq}]});
         await new Promise(r=>setTimeout(r,500));
         const testY=sampleFrameY();
+        const liveTest=track.getSettings().exposureTime;
         await track.applyConstraints({advanced:[{exposureTime:req}]});
         await new Promise(r=>setTimeout(r,500));
         y=sampleFrameY();
-        if(Math.abs(testY-y)>5){
-          trail.push(req+'(verify)');
+        const liveBack=track.getSettings().exposureTime;
+        const yMoved=Math.abs(testY-y)>5;
+        const settingsMoved=Number.isFinite(liveTest)&&Number.isFinite(liveBack)&&
+          Math.abs(liveTest-liveBack)>Math.max(2,0.2*base)&&
+          ((testReq>base)===(liveTest>liveBack));
+        if(yMoved||settingsMoved){
+          trail.push(Math.round(base)+'→'+Math.round(testReq)+'(verify'+(yMoved?'Y':'')+(settingsMoved?'S':'')+')');
         }
       }catch(e){/* Verify fehlgeschlagen - trail bleibt bei length===1, kein Beleg, korrekt konservativ */}
     }
