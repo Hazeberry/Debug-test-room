@@ -722,4 +722,4 @@ visualisieren, die von der Rohdatenerfassung bis zur finalen Ausgabe reicht. Der
 Datenfluss beginnt mit der Sensorik-Schicht, die über die Image Capture API die Kamera
 hardwarenah steuert, manuelle Einstellungen für Belichtung, ISO und Weißabgleich
 sperrt und die Rohdaten extrahiert. Diese Daten werden dann an die 
-Signalverarbeitungsschicht weitergeleitet, die die kritischehttps://hazeberry.github.io/Debug-test-room/
+Signalverarbeitungsschicht weitergeleitet, die die kritische
